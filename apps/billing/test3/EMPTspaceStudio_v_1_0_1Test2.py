@@ -1,3 +1,21 @@
+"""
+EMPTspace Studio - A 3D Printing Billing and Management Application 
+Copyright (C) 2023 EMPTspace Studio 
+
+developed by EMPTspace Studio Team
+team lead by: Kezin B Wilson
+"""
+
+"""
+major changes:
+- update pdf generation to use reportlab
+- add logo to invoice
+- improve layout and styling of invoice
+
+fixed: all known bugs
+
+"""
+
 import sys
 import os
 import numpy as np
@@ -11,6 +29,21 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
+import time
+from fpdf import FPDF
+from PyQt5.QtCore import QDateTime
+from PyQt5.QtWidgets import QStatusBar 
+
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter, inch
+from reportlab.lib.units import inch
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import Paragraph, Image, Spacer, SimpleDocTemplate, PageBreak
+from reportlab.lib.enums import TA_CENTER
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
 
 class STLViewer(gl.GLViewWidget):
     def __init__(self, parent=None):
@@ -43,6 +76,7 @@ class STLViewer(gl.GLViewWidget):
             
         except Exception as e:
             QMessageBox.critical(self, "STL Error", f"Error loading STL file:\n{str(e)}")
+            self.window().status_message.setText("Error loading STL file")
 
     def reset_camera(self):
         self.setCameraPosition(distance=200, elevation=30, azimuth=45)
@@ -135,6 +169,8 @@ class GCodeLoaderTab(QWidget):
     def analyze_gcode(self):
         if not hasattr(self, 'file_path'):
             QMessageBox.warning(self, "Error", "Please select a G-code file first.")
+            self.window().status_message.setText("Please select a G-code file first.")
+            self.window().status_message.setStyleSheet("color: red; font-weight: bold;")
             return
             
         try:
@@ -194,7 +230,7 @@ class GCodeLoaderTab(QWidget):
 
         except Exception as e:
             raise RuntimeError(f"Error parsing G-code: {str(e)}")
-            
+
         return metadata
 
     def display_results(self):
@@ -217,12 +253,14 @@ class GCodeLoaderTab(QWidget):
         )
         
         self.results_text.setText(result_text)
-    
+        self.window().status_message.setText("G-code analysis complete")
+
     def go_to_pricing(self):
         if self.metadata:
             # Convert time to hours for pricing calculation
             self.metadata["time_hours"] = self.metadata["time"] / 3600.0
             self.pricing_requested.emit(self.metadata)
+
 
 class PricingTab(QWidget):
     stl_view_requested = pyqtSignal()
@@ -231,9 +269,15 @@ class PricingTab(QWidget):
         super().__init__()
         self.init_ui()
         self.metadata = None
+        self.final_price = 0.0  # Store final price for invoice
         
     def init_ui(self):
-        layout = QVBoxLayout()
+        # Create a horizontal splitter for 50/50 layout
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left panel (existing pricing calculator)
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
         
         # Header with back button
         header_layout = QHBoxLayout()
@@ -246,8 +290,7 @@ class PricingTab(QWidget):
         title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #333;")
         header_layout.addWidget(title)
         header_layout.addStretch()
-        
-        layout.addLayout(header_layout)
+        left_layout.addLayout(header_layout)
         
         # Print time from G-code
         self.time_group = QGroupBox("Print Time from G-code")
@@ -256,9 +299,7 @@ class PricingTab(QWidget):
         self.time_label.setStyleSheet("font-weight: bold;")
         time_layout.addWidget(self.time_label)
         self.time_group.setLayout(time_layout)
-        self.time_group.setFixedWidth(600)
-        self.time_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        layout.addWidget(self.time_group)
+        left_layout.addWidget(self.time_group)
         
         # Material info from G-code
         self.material_group = QGroupBox("Material Estimate from G-code")
@@ -266,22 +307,19 @@ class PricingTab(QWidget):
         self.material_label = QLabel("No G-code data loaded")
         self.material_label.setStyleSheet("font-weight: bold;")
         material_layout.addWidget(self.material_label)
-        self.material_group.setFixedWidth(600)
         self.material_group.setLayout(material_layout)
-        layout.addWidget(self.material_group)
+        left_layout.addWidget(self.material_group)
         
         # Input fields
         input_group = QGroupBox("Cost Parameters")
         input_layout = QVBoxLayout()
-        input_group.setFixedWidth(600)
-        input_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         
         self.inputs = {}
         fields = {
             "Weight (grams)": "weight",
-            "Post-processing Cost (₹)": "post",
-            "Electricity Rate (₹/kWh)": "electricity_rate",
-            "Machine Rate (₹/hour)": "machine_rate",
+            "Post-processing Cost (Rs )": "post",
+            "Electricity Rate (Rs /kWh)": "electricity_rate",
+            "Machine Rate (Rs /hour)": "machine_rate",
             "Profit Margin (%)": "profit"
         }
 
@@ -305,7 +343,7 @@ class PricingTab(QWidget):
             input_layout.addLayout(hbox)
         
         input_group.setLayout(input_layout)
-        layout.addWidget(input_group)
+        left_layout.addWidget(input_group)
         
         # Calculate button
         self.calc_button = QPushButton("Calculate Price")
@@ -313,9 +351,7 @@ class PricingTab(QWidget):
         self.calc_button.setStyleSheet(
             "background-color: #FF9800; color: white; padding: 10px; font-size: 14pt; font-weight: bold;"
         )
-        self.setFixedWidth(600)
-        self.calc_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        layout.addWidget(self.calc_button)
+        left_layout.addWidget(self.calc_button)
         
         # Results display
         self.result_label = QLabel("")
@@ -323,18 +359,84 @@ class PricingTab(QWidget):
             "font-weight: bold; font-size: 12pt; background-color: #f0f0f0; padding: 15px; border: 1px solid #ddd;"
         )
         self.result_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.result_label)
+        left_layout.addWidget(self.result_label)
         
-        # STL viewer button
-        stl_button = QPushButton("View STL File →")
-        stl_button.clicked.connect(lambda: self.stl_view_requested.emit())
-        stl_button.setStyleSheet(
-            "background-color: #9C27B0; color: white; padding: 10px; font-size: 14pt; font-weight: bold;"
+        left_layout.addStretch(1)
+        
+        # Right panel (customer details and invoice)
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        
+        # Customer details group
+        customer_group = QGroupBox("Customer Details")
+        customer_layout = QVBoxLayout()
+        
+        self.customer_fields = {}
+        customer_info = {
+            "Name": "name",
+            "Phone": "phone",
+            "Email": "email",
+            "Address": "address"
+        }
+        
+        for label_text, key in customer_info.items():
+            vbox = QVBoxLayout()
+            label = QLabel(label_text)
+            input_field = QLineEdit()
+            self.customer_fields[key] = input_field
+            
+            vbox.addWidget(label)
+            vbox.addWidget(input_field)
+            customer_layout.addLayout(vbox)
+        
+        customer_group.setLayout(customer_layout)
+        right_layout.addWidget(customer_group)
+        
+        # Order details group
+        order_group = QGroupBox("Order Information")
+        order_layout = QVBoxLayout()
+        
+        # Generate order number
+        self.order_number = f"ORD-{int(time.time())}"
+        order_num_label = QLabel(f"Order #: {self.order_number}")
+        order_num_label.setStyleSheet("font-weight: bold; color: #333;")
+        order_layout.addWidget(order_num_label)
+        
+        # Order date
+        self.order_date = QDateTime.currentDateTime().toString("dd MMM yyyy hh:mm AP")
+        date_label = QLabel(f"Date: {self.order_date}")
+        date_label.setStyleSheet("color: #555;")
+        order_layout.addWidget(date_label)
+        
+        # Print details (will be populated later)
+        self.print_details_label = QLabel("Print details will appear here")
+        self.print_details_label.setWordWrap(True)
+        self.print_details_label.setStyleSheet("background-color: #f9f9f9; padding: 10px; border: 1px solid #eee;")
+        order_layout.addWidget(self.print_details_label)
+        
+        order_group.setLayout(order_layout)
+        right_layout.addWidget(order_group)
+        
+        # Invoice button
+        self.invoice_button = QPushButton("Generate Invoice (PDF)")
+        self.invoice_button.setEnabled(False)
+        self.invoice_button.clicked.connect(self.generate_invoice)
+        self.invoice_button.setStyleSheet(
+            "background-color: #4CAF50; color: white; padding: 10px; font-size: 14pt; font-weight: bold;"
         )
-        layout.addWidget(stl_button)
+        right_layout.addWidget(self.invoice_button)
         
-        layout.addStretch(1)
-        self.setLayout(layout)
+        right_layout.addStretch(1)
+        
+        # Add both widgets to splitter
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+        splitter.setSizes([self.width()//2, self.width()//2])
+        
+        # Set main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(splitter)
+        self.setLayout(main_layout)
     
     def set_metadata(self, metadata):
         self.metadata = metadata
@@ -344,10 +446,16 @@ class PricingTab(QWidget):
         
         # Calculate and display material estimate
         weight_g = self.calculate_material(metadata['filament'])
-        self.material_label.setText(f"Filament: {metadata['filament']} ≈ {weight_g:.1f}g")
+        # self.material_label.setText(f"Filament: {metadata['filament']} ≈ {weight_g:.1f}g")
+        self.material_label.setText(f"Filament: {metadata['filament']} ~ {weight_g:.1f}g")
+        # self.material_label.setText(f"Filament: {metadata['filament']} approx. {weight_g:.1f}g")
+
         
         # Update weight input field with calculated value
         self.inputs['weight'].setText(f"{weight_g:.1f}")
+        
+        # Update print details in order info
+        self.update_print_details()
 
     def calculate_material(self, filament_str):
         """Calculate material weight from filament length string"""
@@ -374,6 +482,9 @@ class PricingTab(QWidget):
             
         except Exception as e:
             print(f"Error calculating material: {e}")
+            QMessageBox.warning(self, "Material Calculation Error", 
+                                f"Failed to calculate material weight:\n{str(e)}")
+            self.window().status_message.setText("Error calculating material weight")
             return 0.0  # Return 0 on error
 
     def calculate_price(self):
@@ -390,6 +501,7 @@ class PricingTab(QWidget):
             else:
                 raise ValueError("No time data available")
             
+            
             # Constants
             cost_per_gram = 0.7
             power_usage_kw = 0.12
@@ -401,17 +513,299 @@ class PricingTab(QWidget):
             total_cost = material_cost + electricity_cost + machine_cost + post
             final_price = total_cost * (1 + profit / 100)
 
+            # Store final price for invoice
+            self.final_price = final_price
+            
+            # Enable invoice button
+            self.invoice_button.setEnabled(True)
+            
+            # Update result label
             self.result_label.setText(
-                f"Material Cost: ₹{material_cost:.2f}\n"
-                f"Electricity Cost: ₹{electricity_cost:.2f}\n"
-                f"Machine Time: ₹{machine_cost:.2f}\n"
-                f"Post-processing: ₹{post:.2f}\n"
-                f"TOTAL COST: ₹{total_cost:.2f}\n"
-                f"FINAL PRICE: ₹{final_price:.0f}"
+                f"Material Cost: Rs{material_cost:.2f}\n"
+                f"Electricity Cost: Rs {electricity_cost:.2f}\n"
+                f"Machine Time: Rs {machine_cost:.2f}\n"
+                f"Post-processing: Rs {post:.2f}\n"
+                f"TOTAL COST: Rs {total_cost:.2f}\n"
+                f"FINAL PRICE: Rs {final_price:.0f}"
+            )
+            
+            # Update print details with pricing
+            self.update_print_details()
+            self.window().status_message.setText("Pricing calculated successfully")
+            self.print_details_label.setText(
+                self.print_details_label.text() + 
+                f"\nFinal Price: Rs {final_price:.0f}"
             )
 
         except Exception as e:
             QMessageBox.warning(self, "Input Error", f"Please check your inputs:\n{str(e)}")
+            self.window().status_message.setText("Please check your inputs")
+            self.window().status_message.setStyleSheet("color: red; font-weight: bold;")
+            
+    def update_print_details(self):
+        if not self.metadata:
+            return
+            
+        details = (
+            f"Print Time: {self.time_label.text()}\n"
+            f"Material: {self.material_label.text()}\n"
+        )
+        self.print_details_label.setText(details)
+    
+    def generate_invoice(self):
+        # Validate customer details
+        if not all(self.customer_fields[field].text().strip() for field in ['name', 'phone']):
+            QMessageBox.warning(self, "Missing Information", "Please fill in at least Name and Phone fields")
+            self.window().status_message.setText("Please fill in all required fields.")
+            return
+        
+        try:
+            # Get customer details
+            customer = {key: field.text() for key, field in self.customer_fields.items()}
+            
+            # Generate PDF filename
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Save Invoice", 
+                f"Invoice_{self.order_number}.pdf", 
+                "PDF Files (*.pdf)"
+            )
+            
+            if not filename:
+                return  # User canceled
+                
+            # Create PDF document
+            doc = SimpleDocTemplate(
+                filename,
+                pagesize=letter,
+                leftMargin=40,
+                rightMargin=40,
+                topMargin=60,
+                bottomMargin=60
+            )
+            
+            # Define styles with unique names
+            styles = getSampleStyleSheet()
+            styles.add(ParagraphStyle(
+                name='InvoiceTitle',
+                parent=styles['Title'],
+                fontName='Helvetica-Bold',
+                fontSize=16,
+                alignment=TA_CENTER,
+                spaceAfter=12
+            ))
+            styles.add(ParagraphStyle(
+                name='InvoiceHeading',
+                parent=styles['Heading2'],
+                fontName='Helvetica-Bold',
+                fontSize=12,
+                spaceAfter=4
+            ))
+            styles.add(ParagraphStyle(
+                name='InvoiceBody',
+                parent=styles['BodyText'],
+                fontName='Helvetica',
+                fontSize=10
+            ))
+            styles.add(ParagraphStyle(
+                name='InvoiceTableHeader',
+                parent=styles['BodyText'],
+                fontName='Helvetica-Bold',
+                fontSize=10,
+                alignment=TA_CENTER
+            ))
+            styles.add(ParagraphStyle(
+                name='InvoiceFooter',
+                parent=styles['BodyText'],
+                fontName='Helvetica',
+                fontSize=8,
+                textColor=colors.grey
+            ))
+            styles.add(ParagraphStyle(
+                name='InvoiceSignature',
+                parent=styles['BodyText'],
+                fontName='Helvetica',
+                fontSize=8,
+                textColor=colors.darkgrey,
+                alignment=TA_CENTER,
+                spaceBefore=15,
+                italic=True
+            ))
+            
+            # Create story (content elements)
+            story = []
+            
+            # Add logo and title in a table for better layout
+            logo_path = "logoMain.png"  # Update with your logo path
+            # if os.path.exists(logo_path):
+            #     logo = Image(logo_path, width=202, height=62)
+            #     # Create table with logo and title
+            #     header_table = Table([
+            #         [logo, Paragraph("INVOICE", styles['InvoiceTitle'])]
+            #     ], colWidths=[150, 350])
+            #     header_table.setStyle(TableStyle([
+            #         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            #         ('ALIGN', (0,0), (0,0), 'RIGHT'),
+            #         ('ALIGN', (1,0), (1,0), 'LEFT'),
+            #     ]))
+            #     story.append(header_table)
+            # else:
+            #     # If no logo, just show title
+            #     story.append(Paragraph("INVOICE", styles['InvoiceTitle']))
+            
+            # story.append(Spacer(1, 10))
+            if os.path.exists(logo_path):
+                logo = Image(logo_path, width=202, height=62)
+                # Create table with logo on top and title below
+                header_table = Table([
+                    [logo],  # Logo in first row
+                    [Paragraph("INVOICE", styles['InvoiceTitle'])]  # Title in second row
+                ], colWidths=[200])  # Adjust width if needed
+                
+                header_table.setStyle(TableStyle([
+                    ('ALIGN', (0,0), (0,0), 'CENTER'),  # Center logo
+                    ('ALIGN', (0,1), (0,1), 'CENTER'),  # Center title
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE')  # Ensure vertical alignment
+                ]))
+                
+                story.append(header_table)
+            else:
+                # If no logo, just show title
+                story.append(Paragraph("INVOICE", styles['InvoiceTitle']))
+
+            story.append(Spacer(1, 10))
+            
+            # Add horizontal line separator
+            separator = Table([[""]], colWidths=[500], style=[
+                ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.lightgrey)
+            ])
+            story.append(separator)
+            story.append(Spacer(1, 15))
+            
+            # Order information
+            order_info = [
+                [Paragraph("Order #", styles['InvoiceBody']), Paragraph(self.order_number, styles['InvoiceBody'])],
+                [Paragraph("Date", styles['InvoiceBody']), Paragraph(self.order_date, styles['InvoiceBody'])]
+            ]
+            
+            order_table = Table(order_info, colWidths=[100, 200])
+            order_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5)
+            ]))
+            story.append(order_table)
+            story.append(Spacer(1, 15))
+            
+            # Customer information
+            story.append(Paragraph("Bill To:", styles['InvoiceHeading']))
+            customer_info = [
+                [Paragraph("Name:", styles['InvoiceBody']), Paragraph(customer['name'], styles['InvoiceBody'])],
+                [Paragraph("Phone:", styles['InvoiceBody']), Paragraph(customer['phone'], styles['InvoiceBody'])]
+            ]
+            
+            if customer['email']:
+                customer_info.append([Paragraph("Email:", styles['InvoiceBody']), Paragraph(customer['email'], styles['InvoiceBody'])])
+            if customer['address']:
+                customer_info.append([Paragraph("Address:", styles['InvoiceBody']), Paragraph(customer['address'], styles['InvoiceBody'])])
+            
+            cust_table = Table(customer_info, colWidths=[60, 240])
+            cust_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3)
+            ]))
+            story.append(cust_table)
+            
+            # Add horizontal line separator
+            story.append(Spacer(1, 10))
+            story.append(separator)
+            story.append(Spacer(1, 15))
+            
+            # Print details
+            story.append(Paragraph("Print Details", styles['InvoiceHeading']))
+            print_details = self.print_details_label.text().split('\n')
+            for detail in print_details:
+                if detail:  # Skip empty lines
+                    story.append(Paragraph(detail, styles['InvoiceBody']))
+            
+            # Add horizontal line separator
+            story.append(Spacer(1, 15))
+            story.append(separator)
+            story.append(Spacer(1, 15))
+            
+            # Pricing breakdown table
+            story.append(Paragraph("Pricing Breakdown", styles['InvoiceHeading']))
+            
+            # Prepare table data
+            breakdown = self.result_label.text().split('\n')
+            table_data = [
+                [Paragraph("Description", styles['InvoiceTableHeader']), 
+                Paragraph("Amount (Rs)", styles['InvoiceTableHeader'])]
+            ]
+            
+            for line in breakdown[:-1]:  # Skip final price line
+                if line:
+                    parts = line.split(':')
+                    if len(parts) == 2:
+                        table_data.append([
+                            Paragraph(parts[0].strip(), styles['InvoiceBody']),
+                            Paragraph(parts[1].strip(), styles['InvoiceBody'])
+                        ])
+            
+            # Add total row
+            table_data.append([
+                Paragraph("TOTAL COST", styles['InvoiceBody']),
+                Paragraph(f"Rs {self.final_price:.2f}", styles['InvoiceBody'])
+            ])
+            
+            # Create table
+            pricing_table = Table(table_data, colWidths=[350, 100])
+            pricing_table.setStyle(TableStyle([
+                ('FONT', (0, 0), (-1, 0), 'Helvetica-Bold', 10),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black),
+                ('FONT', (0, -1), (-1, -1), 'Helvetica-Bold', 10),
+            ]))
+            
+            story.append(pricing_table)
+            
+            # Add horizontal line separator
+            story.append(Spacer(1, 15))
+            story.append(separator)
+            
+            # Add signature note
+            story.append(Paragraph("Auto-generated invoice - No signature required", styles['InvoiceSignature']))
+            story.append(Spacer(1, 20))
+            
+            # Footer
+            footer = [
+                Paragraph("Thank you for your business!", styles['InvoiceBody']),
+                Paragraph("EMPTspace inc.", styles['InvoiceBody']),
+                Paragraph("123 Innovation Street, Tech City", styles['InvoiceFooter']),
+                Paragraph("Phone: +1 (555) 123-4567 | Email: info@emptspace.com", styles['InvoiceFooter'])
+            ]
+            
+            for item in footer:
+                story.append(item)
+                story.append(Spacer(1, 3))
+            
+            # Build PDF
+            doc.build(story)
+            
+            # Show success message
+            QMessageBox.information(self, "Invoice Generated", 
+                                f"Invoice saved successfully as:\n{filename}")
+            self.window().status_message.setText("Invoice generated successfully")
+            self.window().status_message.setStyleSheet("color: green; font-weight: bold;")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "PDF Error", f"Failed to generate PDF:\n{str(e)}")
+            self.window().status_message.setText("Error generating invoice")
+            self.window().status_message.setStyleSheet("color: red; font-weight: bold;")
 
 class STLViewerTab(QWidget):
     def __init__(self):
@@ -472,7 +866,7 @@ class STLViewerTab(QWidget):
 class MainApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("3D Print Studio")
+        self.setWindowTitle("EMPT Studio")
         self.setGeometry(100, 100, 1200, 700)
         self.init_ui()
         self.current_metadata = None
@@ -512,13 +906,34 @@ class MainApp(QWidget):
         self.tabs.addTab(self.tab2, "Pricing Calculator")
         self.tabs.addTab(self.tab3, "STL Viewer")
         
+        
         # Connect signals
         self.tab1.pricing_requested.connect(self.handle_pricing_request)
         self.tab2.stl_view_requested.connect(self.handle_stl_view_request)
         self.tab3.back_button.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
         self.tab2.back_button.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
         
+        self.status_bar = QStatusBar()
+        self.status_bar.setStyleSheet("""
+            QStatusBar {
+                background-color: #f0f0f0;
+                color: #333;
+                border-top: 1px solid #ddd;
+                padding: 2px;
+            }
+        """)
+        
+        # Add company name to status bar
+        self.status_message = QLabel("Ready")
+        self.status_bar.addWidget(self.status_message, 1)  # Make it expandable
+        
+        company_label = QLabel("EMPTspace inc.")
+        company_label.setStyleSheet("font-weight: bold; padding-left: 10px;")
+        company_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.status_bar.addPermanentWidget(company_label)             
+        
         layout.addWidget(self.tabs)
+        layout.addWidget(self.status_bar)
         self.setLayout(layout)
     
     def handle_pricing_request(self, metadata):
